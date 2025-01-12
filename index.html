@@ -1,7 +1,133 @@
-<!DOCTYPE>
-<head>MUHAMMAD AKIF</head>
-  <body>
-    <html>
-      
-    </html>
-  </body>
+// server.js
+
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server);
+
+const PORT = process.env.PORT || 3000;
+
+// Serve static files from the 'public' directory
+app.use(express.static('public'));
+
+// Game state
+let waitingPlayer = null;
+let games = {};
+
+io.on('connection', (socket) => {
+  console.log(`New client connected: ${socket.id}`);
+
+  // Assign player to a game
+  if (waitingPlayer) {
+    // Start a new game
+    const gameId = `${waitingPlayer.id}#${socket.id}`;
+    games[gameId] = {
+      players: [waitingPlayer, socket],
+      board: Array(9).fill(null),
+      currentTurn: waitingPlayer.id,
+    };
+
+    // Notify players
+    waitingPlayer.emit('gameStart', { symbol: 'X', opponent: socket.id });
+    socket.emit('gameStart', { symbol: 'O', opponent: waitingPlayer.id });
+
+    // Clear waiting player
+    waitingPlayer = null;
+  } else {
+    // Wait for another player
+    waitingPlayer = socket;
+    socket.emit('waiting', 'Waiting for an opponent...');
+  }
+
+  // Handle moves
+  socket.on('makeMove', (data) => {
+    const game = findGame(socket.id);
+    if (!game) return;
+
+    const { index } = data;
+
+    // Validate move
+    if (
+      game.board[index] ||
+      game.currentTurn !== socket.id
+    ) {
+      return;
+    }
+
+    // Update board
+    const playerSymbol = game.players[0].id === socket.id ? 'X' : 'O';
+    game.board[index] = playerSymbol;
+
+    // Check for win or draw
+    const winner = checkWinner(game.board);
+    if (winner) {
+      io.to(game.players[0].id).emit('gameOver', { result: winner === 'X' ? 'Player 1 wins!' : 'Player 2 wins!' });
+      io.to(game.players[1].id).emit('gameOver', { result: winner === 'O' ? 'Player 2 wins!' : 'Player 1 wins!' });
+      delete games[`${game.players[0].id}#${game.players[1].id}`];
+      return;
+    }
+
+    if (game.board.every(cell => cell)) {
+      io.to(game.players[0].id).emit('gameOver', { result: 'Draw!' });
+      io.to(game.players[1].id).emit('gameOver', { result: 'Draw!' });
+      delete games[`${game.players[0].id}#${game.players[1].id}`];
+      return;
+    }
+
+    // Switch turn
+    game.currentTurn = game.players.find(p => p.id !== socket.id).id;
+
+    // Update clients
+    io.to(game.players[0].id).emit('update', { board: game.board, currentTurn: game.currentTurn });
+    io.to(game.players[1].id).emit('update', { board: game.board, currentTurn: game.currentTurn });
+  });
+
+  // Handle disconnection
+  socket.on('disconnect', () => {
+    console.log(`Client disconnected: ${socket.id}`);
+    // Notify opponent if in a game
+    const game = findGame(socket.id);
+    if (game) {
+      const opponent = game.players.find(p => p.id !== socket.id);
+      if (opponent) {
+        opponent.emit('opponentLeft', 'Your opponent has left the game.');
+      }
+      delete games[`${game.players[0].id}#${game.players[1].id}`];
+    }
+    // If waiting player disconnects
+    if (waitingPlayer && waitingPlayer.id === socket.id) {
+      waitingPlayer = null;
+    }
+  });
+});
+
+// Helper functions
+function findGame(socketId) {
+  return Object.values(games).find(game =>
+    game.players.some(player => player.id === socketId)
+  );
+}
+
+function checkWinner(board) {
+  const winPatterns = [
+    [0,1,2], [3,4,5], [6,7,8], // rows
+    [0,3,6], [1,4,7], [2,5,8], // columns
+    [0,4,8], [2,4,6]           // diagonals
+  ];
+
+  for (let pattern of winPatterns) {
+    const [a, b, c] = pattern;
+    if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+      return board[a];
+    }
+  }
+  return null;
+}
+
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
+
